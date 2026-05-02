@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+、FastAPI、SQLite、ChromaDB、DeepSeek API、Gradio、python-docx、ebooklib、jieba
 
-**项目路径:** `H:\AI\personalCode\deep-reviser\` (映射为 `/mnt/h/AI/personalCode/deep-reviser/`)
+**项目路径:** `<project_root>` (Windows 原生 Python venv)
 
 **环境位置:** Windows 原生 Python (conda)，不安装在 WSL 中
 
@@ -28,7 +28,7 @@
 
 **Step 1: 创建项目目录结构**
 
-在 Windows 上 (`H:\AI\personalCode\deep-reviser\`) 创建以下结构：
+在 Windows 项目根目录下创建以下结构：
 ```
 deep-reviser/
 ├── src/
@@ -69,7 +69,7 @@ conda create -n deep-reviser python=3.11 -y
 conda activate deep-reviser
 
 # 进入项目目录
-cd H:\AI\personalCode\deep-reviser
+cd <project_root>
 ```
 
 **Step 3: 创建 requirements.txt**
@@ -157,7 +157,7 @@ settings = Settings()
 ```powershell
 # Windows 上验证
 conda activate deep-reviser
-cd H:\AI\personalCode\deep-reviser
+cd <project_root>
 pip install -r requirements.txt
 python -c "from src.config import settings; print('Config OK:', settings.deepseek_model)"
 ```
@@ -678,7 +678,7 @@ def get_db():
 ```powershell
 # Windows PowerShell
 conda activate deep-reviser
-cd H:\AI\personalCode\deep-reviser
+cd <project_root>
 
 # 初始化数据库
 python -c "from src.database.session import init_db; init_db()"
