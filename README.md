@@ -71,7 +71,7 @@
 
 ```powershell
 # 克隆项目
-git clone git@github.com:urushibararuka418/deep-reviser.git
+git clone git@github.com:urushibararuka418-spec/deep-reviser.git
 cd deep-reviser
 
 # 创建虚拟环境
