@@ -5,7 +5,6 @@ import json
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from src.api.schemas import (
-    AnalysisImportRequest,
     ExportRequest,
     ExtractRequest,
     RewriteBatchRequest,
@@ -43,23 +42,54 @@ def analyses():
     return {"items": get_app_service().list_analyses()}
 
 
+async def _read_optional_json_file(file: UploadFile | None, field_name: str):
+    """读取可选 JSON 文件；未上传时返回 None。"""
+    if file is None:
+        return None
+
+    try:
+        content = await file.read()
+        return json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{field_name} JSON 解析失败: {exc}") from exc
+
+
 @router.post("/import-analysis")
 async def import_analysis(
-    file: UploadFile | None = File(default=None),
-    analysis_json: str | None = Form(default=None),
+    title: str = Form("未命名导入"),
+    chapters_json: UploadFile | None = File(default=None),
+    segments_json: UploadFile | None = File(default=None),
+    characters_json: UploadFile | None = File(default=None),
+    events_json: UploadFile | None = File(default=None),
+    lore_json: UploadFile | None = File(default=None),
+    style_json: UploadFile | None = File(default=None),
 ):
-    """导入分析记录 JSON 文件或 JSON 字符串。"""
+    """按类型导入分析记录 JSON 文件。"""
     try:
-        if file is not None:
-            content = await file.read()
-            payload = json.loads(content.decode("utf-8"))
-        elif analysis_json:
-            payload = AnalysisImportRequest(analysis=json.loads(analysis_json)).analysis
-        else:
-            raise ValueError("请提供 analysis_json 或 JSON 文件。")
+        field_payloads = {
+            "chapters": await _read_optional_json_file(chapters_json, "章节"),
+            "segments": await _read_optional_json_file(segments_json, "段落"),
+            "characters": await _read_optional_json_file(characters_json, "角色"),
+            "events": await _read_optional_json_file(events_json, "剧情"),
+            "lore_entries": await _read_optional_json_file(lore_json, "设定"),
+            "style": await _read_optional_json_file(style_json, "风格"),
+        }
+        if not any(value is not None for value in field_payloads.values()):
+            raise ValueError("请至少上传一个 JSON 文件。")
 
-        return get_app_service().import_analysis(payload)
-    except (ValueError, json.JSONDecodeError) as exc:
+        normalized_payload = {}
+        for field_name, value in field_payloads.items():
+            if value is None:
+                continue
+
+            # 兼容直接上传列表/对象，或包裹在同名字段中的 JSON。
+            if isinstance(value, dict) and field_name in value:
+                normalized_payload[field_name] = value[field_name]
+            else:
+                normalized_payload[field_name] = value
+
+        return get_app_service().import_analysis(title=title, **normalized_payload)
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

@@ -173,18 +173,41 @@ def _handle_analysis_select(novel_title):
     )
 
 
-def _handle_import_analysis(file_obj):
+def _load_optional_json_file(file_obj, field_name):
     if file_obj is None:
-        raise gr.Error("请选择要导入的 JSON 文件。")
+        return None
 
     file_path = getattr(file_obj, "name", file_obj)
     try:
         with open(file_path, encoding="utf-8") as handle:
             payload = json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:
-        raise gr.Error(f"导入失败: {exc}") from exc
+        raise gr.Error(f"{field_name} 导入失败: {exc}") from exc
 
-    analysis = get_app_service().import_analysis(payload)
+    return payload.get(field_name) if isinstance(payload, dict) and field_name in payload else payload
+
+
+def _handle_import_analysis(
+    title,
+    chapters_file,
+    segments_file,
+    characters_file,
+    events_file,
+    lore_file,
+    style_file,
+):
+    payload = {
+        "chapters": _load_optional_json_file(chapters_file, "chapters"),
+        "segments": _load_optional_json_file(segments_file, "segments"),
+        "characters": _load_optional_json_file(characters_file, "characters"),
+        "events": _load_optional_json_file(events_file, "events"),
+        "lore_entries": _load_optional_json_file(lore_file, "lore_entries"),
+        "style": _load_optional_json_file(style_file, "style"),
+    }
+    if not any(value is not None for value in payload.values()):
+        raise gr.Error("请至少选择一个 JSON 文件。")
+
+    analysis = get_app_service().import_analysis(title=title, **payload)
     return (
         f"已导入分析记录：{analysis['novel_title']}",
         gr.Dropdown(choices=_get_analysis_choices(), value=analysis["novel_title"]),
@@ -240,7 +263,13 @@ def build_app() -> gr.Blocks:
                         choices=_get_analysis_choices(),
                         allow_custom_value=False,
                     )
-                    import_file = gr.File(label="导入 JSON", file_types=[".json"])
+                    import_title = gr.Textbox(label="导入标题", value="未命名导入")
+                    import_chapters_file = gr.File(label="章节 JSON（可选）", file_types=[".json"])
+                    import_segments_file = gr.File(label="段落 JSON（可选）", file_types=[".json"])
+                    import_characters_file = gr.File(label="角色 JSON（可选）", file_types=[".json"])
+                    import_events_file = gr.File(label="剧情 JSON（可选）", file_types=[".json"])
+                    import_lore_file = gr.File(label="设定 JSON（可选）", file_types=[".json"])
+                    import_style_file = gr.File(label="风格 JSON（可选）", file_types=[".json"])
                     import_btn = gr.Button("导入分析记录")
                     import_status = gr.Textbox(label="导入状态", lines=2)
 
@@ -330,7 +359,15 @@ def build_app() -> gr.Blocks:
         )
         import_btn.click(
             _handle_import_analysis,
-            inputs=[import_file],
+            inputs=[
+                import_title,
+                import_chapters_file,
+                import_segments_file,
+                import_characters_file,
+                import_events_file,
+                import_lore_file,
+                import_style_file,
+            ],
             outputs=[
                 import_status,
                 analysis_selector,

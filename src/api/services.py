@@ -192,8 +192,31 @@ class AppService:
             )
         return sorted(items, key=lambda item: (item["created_at"], item["novel_title"]), reverse=True)
 
-    def import_analysis(self, analysis: dict) -> dict:
+    def import_analysis(
+        self,
+        analysis: dict | None = None,
+        *,
+        title: str | None = None,
+        chapters: list[dict] | None = None,
+        segments: list[dict] | None = None,
+        characters: list[dict] | None = None,
+        events: list[dict] | None = None,
+        lore_entries: list[dict] | None = None,
+        style: dict | None = None,
+    ) -> dict:
         """导入外部分析记录，并切换为当前活动分析。"""
+        if analysis is None:
+            # 按类型文件导入时，将已上传字段合并为统一分析记录。
+            analysis = {
+                "novel_title": title,
+                "chapters": chapters or [],
+                "segments": segments or [],
+                "characters": characters or [],
+                "events": events or [],
+                "lore_entries": lore_entries or [],
+                "style": style or {},
+            }
+
         saved = self.save_analysis(analysis)
         self.use_analysis(saved["novel_title"])
         return saved
