@@ -27,6 +27,7 @@ db/chroma/
 
 # Upload data
 data/uploads/*
+data/analyses/
 
 # OS
 .DS_Store
