@@ -42,3 +42,6 @@ htmlcov/
 
 # Logs
 *.log
+
+# Hermes (本地留存，不提交)
+.hermes/

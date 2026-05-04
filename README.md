@@ -124,8 +124,7 @@ deep-reviser/
 │   │   └── session.py            # 引擎/会话/init_db
 │   ├── rewriter/                 # ⏳ 改写引擎
 │   └── ui/                       # ⏳ Gradio 前端
-├── tests/                        # pytest 测试套件 (37 tests)
-├── .hermes/plans/                # 完整实施计划
+├── tests/                        # pytest 测试套件 (49 tests)
 ├── requirements.txt
 └── LICENSE                       # GPLv3
 ```
@@ -162,8 +161,6 @@ deep-reviser/
 - [ ] **Beta**: 向量检索 + 上下文组装 + 改写引擎
 - [ ] **Gamma**: 高级功能 — 全局改文规划 / 伏笔追踪 / 多版本对比
 - [ ] **Stable**: 打磨优化 — Gradio UI / 并行处理 / Token 成本统计
-
-详见 [完整实施计划](.hermes/plans/2026-04-30-deep-reviser-mvp.md)
 
 ---
 
