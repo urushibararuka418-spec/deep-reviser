@@ -1,8 +1,18 @@
 """FastAPI 路由定义。"""
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+import json
 
-from src.api.schemas import ExportRequest, ExtractRequest, RewriteRequest, SegmentsRequest
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+
+from src.api.schemas import (
+    AnalysisImportRequest,
+    ExportRequest,
+    ExtractRequest,
+    RewriteBatchRequest,
+    RewriteChapterRequest,
+    RewriteRequest,
+    SegmentsRequest,
+)
 from src.api.services import get_app_service
 
 
@@ -27,6 +37,32 @@ def extract(payload: ExtractRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/analyses")
+def analyses():
+    """列出所有已保存分析记录。"""
+    return {"items": get_app_service().list_analyses()}
+
+
+@router.post("/import-analysis")
+async def import_analysis(
+    file: UploadFile | None = File(default=None),
+    analysis_json: str | None = Form(default=None),
+):
+    """导入分析记录 JSON 文件或 JSON 字符串。"""
+    try:
+        if file is not None:
+            content = await file.read()
+            payload = json.loads(content.decode("utf-8"))
+        elif analysis_json:
+            payload = AnalysisImportRequest(analysis=json.loads(analysis_json)).analysis
+        else:
+            raise ValueError("请提供 analysis_json 或 JSON 文件。")
+
+        return get_app_service().import_analysis(payload)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/segments")
 def segments(payload: SegmentsRequest):
     """按章节和 chunk_size 分段。"""
@@ -43,6 +79,32 @@ def rewrite(payload: RewriteRequest):
             characters=payload.characters,
             lore_entries=payload.lore_entries,
             similar_segments=payload.similar_segments,
+            temperature=payload.temperature,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/rewrite/chapter")
+def rewrite_chapter(payload: RewriteChapterRequest):
+    """执行单章批量改写。"""
+    try:
+        return get_app_service().rewrite_chapter(
+            payload.chapter_index,
+            payload.instruction,
+            temperature=payload.temperature,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/rewrite/batch")
+def rewrite_batch(payload: RewriteBatchRequest):
+    """执行多章批量改写。"""
+    try:
+        return get_app_service().rewrite_batch(
+            payload.chapter_indices,
+            payload.instruction,
             temperature=payload.temperature,
         )
     except ValueError as exc:

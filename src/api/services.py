@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import difflib
 import json
+from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from uuid import uuid4
@@ -50,19 +52,41 @@ class AppService:
         self.rewrite_engine = RewriteEngine()
         self.consistency_checker = ConsistencyChecker()
         self.vector_store = VectorStore()
+        self.analyses_dir = settings.project_root / "data" / "analyses"
+        self.analyses_dir.mkdir(parents=True, exist_ok=True)
+        self.analyses: dict[str, dict] = {}
+        self.active_analysis: dict | None = None
+        self.current_text = ""
+        self.load_analyses()
 
-    def upload_file(self, file_path: str | Path) -> dict:
+    def upload_file(self, file_path: str | Path, novel_title: str | None = None) -> dict:
         """读取已保存文件并返回预处理结果。"""
         path = Path(file_path)
         text = self.file_loader.load(path)
         chapters = self.chapter_splitter.split_chapters(text)
         segments = self.chapter_splitter.split_segments(text)
+        resolved_title = (novel_title or path.stem or "未命名小说").strip() or "未命名小说"
+
         self._save_chapters(chapters)
         self._index_segments(segments)
+        self._set_active_analysis(
+            {
+                "novel_title": resolved_title,
+                "created_at": self._now_iso(),
+                "characters": [],
+                "events": [],
+                "lore_entries": [],
+                "style": {},
+                "chapters": chapters,
+                "segments": segments,
+            },
+            text=text,
+        )
 
         return {
             "filename": path.name,
             "path": str(path),
+            "novel_title": resolved_title,
             "text": text,
             "chapters": chapters,
             "segments": segments,
@@ -88,12 +112,14 @@ class AppService:
             raise ValueError(f"文件过大，超过 {settings.max_upload_size_mb}MB 限制。")
 
         target_path.write_bytes(content)
-        result = self.upload_file(target_path)
+        original_title = Path(file.filename or "").stem if file.filename else None
+        result = self.upload_file(target_path, novel_title=original_title)
         result["original_filename"] = file.filename
         return result
 
     def extract(self, text: str) -> dict:
         """提取角色、剧情、设定与风格，并写入数据库/向量库。"""
+        analysis = self._prepare_analysis_context(text)
         characters = self.character_extractor.extract(text).get("characters", [])
         events = self.plot_extractor.extract(text).get("events", [])
         lore_entries = self.lore_extractor.extract(text).get("entries", [])
@@ -101,12 +127,172 @@ class AppService:
 
         self._save_extractions(characters, events, lore_entries, style)
         self._index_lore_entries(lore_entries)
+        analysis.update(
+            {
+                "created_at": self._now_iso(),
+                "characters": characters,
+                "events": events,
+                "lore_entries": lore_entries,
+                "style": style,
+            }
+        )
+        analysis = self.save_analysis(analysis)
+        self._set_active_analysis(analysis, text=text)
+
+        return analysis
+
+    def save_analysis(self, analysis: dict) -> dict:
+        """将分析结果保存到磁盘并刷新内存索引。"""
+        normalized = self._normalize_analysis(analysis)
+        file_path = self.analyses_dir / f"{self._safe_filename(normalized['novel_title'])}.json"
+        file_path.write_text(
+            json.dumps(normalized, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self.analyses[normalized["novel_title"]] = {
+            "data": normalized,
+            "file_path": str(file_path),
+        }
+        return self._clone_analysis(normalized)
+
+    def load_analyses(self) -> list[dict]:
+        """扫描分析目录并加载已有记录。"""
+        analyses = {}
+        for file_path in sorted(self.analyses_dir.glob("*.json")):
+            try:
+                payload = json.loads(file_path.read_text(encoding="utf-8"))
+                normalized = self._normalize_analysis(payload, default_title=file_path.stem)
+            except (OSError, json.JSONDecodeError, ValueError):
+                continue
+
+            analyses[normalized["novel_title"]] = {
+                "data": normalized,
+                "file_path": str(file_path),
+            }
+
+        self.analyses = analyses
+        return self.list_analyses()
+
+    def list_analyses(self) -> list[dict]:
+        """返回已保存分析记录的摘要列表。"""
+        items = []
+        for title, entry in self.analyses.items():
+            data = entry["data"]
+            items.append(
+                {
+                    "novel_title": title,
+                    "created_at": data.get("created_at", ""),
+                    "chapter_count": len(data.get("chapters", [])),
+                    "segment_count": len(data.get("segments", [])),
+                    "character_count": len(data.get("characters", [])),
+                    "event_count": len(data.get("events", [])),
+                    "lore_count": len(data.get("lore_entries", [])),
+                    "file_path": entry["file_path"],
+                }
+            )
+        return sorted(items, key=lambda item: (item["created_at"], item["novel_title"]), reverse=True)
+
+    def import_analysis(self, analysis: dict) -> dict:
+        """导入外部分析记录，并切换为当前活动分析。"""
+        saved = self.save_analysis(analysis)
+        self.use_analysis(saved["novel_title"])
+        return saved
+
+    def use_analysis(self, novel_title: str) -> dict:
+        """激活指定分析记录，供 UI 与改写流程复用。"""
+        entry = self.analyses.get(novel_title)
+        if entry is None:
+            raise ValueError(f"未找到分析记录：{novel_title}")
+
+        analysis = self._clone_analysis(entry["data"])
+        self._hydrate_analysis(analysis)
+        self._set_active_analysis(analysis, text=self._rebuild_text_from_chapters(analysis.get("chapters", [])))
+        return self._clone_analysis(analysis)
+
+    def rewrite_chapter(
+        self,
+        chapter_index: int,
+        instruction: str,
+        temperature: float | None = None,
+    ) -> dict:
+        """按章节逐段改写，并返回整章结果。"""
+        analysis = self._require_active_analysis()
+        chapter = self._get_chapter_by_index(analysis, chapter_index)
+        segments = self._get_segments_for_chapter(analysis, chapter_index)
+        rewritten_segments = self._rewrite_segments(
+            segments,
+            instruction,
+            characters=analysis.get("characters", []),
+            lore_entries=analysis.get("lore_entries", []),
+            temperature=temperature,
+        )
+        original_text = "\n\n".join(segment["content"] for segment in segments if segment.get("content"))
+        rewritten_text = "\n\n".join(
+            item["rewritten_text"] for item in rewritten_segments if item.get("rewritten_text")
+        )
 
         return {
-            "characters": characters,
-            "events": events,
-            "lore_entries": lore_entries,
-            "style": style,
+            "chapter_index": chapter_index,
+            "chapter_title": chapter.get("title", f"第 {chapter_index + 1} 章"),
+            "original_text": original_text,
+            "rewritten_text": rewritten_text,
+            "rewritten_segments": rewritten_segments,
+            "rewrite_count": len(rewritten_segments),
+            "diff_html": self._build_diff_html(
+                original_text,
+                rewritten_text,
+                fromdesc="原文",
+                todesc="改写后",
+            ),
+            "stats": {
+                "chapter_count": 1,
+                "rewrite_count": len(rewritten_segments),
+            },
+        }
+
+    def rewrite_batch(
+        self,
+        chapter_indices: list[int],
+        instruction: str,
+        temperature: float | None = None,
+    ) -> dict:
+        """对多个章节执行批量改写。"""
+        unique_indices = []
+        seen = set()
+        for chapter_index in chapter_indices:
+            resolved_index = self._coerce_int(chapter_index)
+            if resolved_index in seen:
+                continue
+            seen.add(resolved_index)
+            unique_indices.append(resolved_index)
+
+        if not unique_indices:
+            raise ValueError("请至少选择一个章节。")
+
+        chapters = [
+            self.rewrite_chapter(index, instruction, temperature=temperature)
+            for index in unique_indices
+        ]
+        combined_original = self._combine_chapter_results(chapters, "original_text")
+        combined_rewritten = self._combine_chapter_results(chapters, "rewritten_text")
+        total_rewrites = sum(item["rewrite_count"] for item in chapters)
+
+        return {
+            "chapters": chapters,
+            "original_text": combined_original,
+            "rewritten_text": combined_rewritten,
+            "rewrite_count": total_rewrites,
+            "diff_html": self._build_diff_html(
+                combined_original,
+                combined_rewritten,
+                fromdesc="原文",
+                todesc="批量改写后",
+            ),
+            "stats": {
+                "chapter_count": len(chapters),
+                "rewrite_count": total_rewrites,
+                "chapter_indices": unique_indices,
+            },
         }
 
     def build_segments(self, text: str, chunk_size: int = 1500) -> dict:
@@ -211,6 +397,20 @@ class AppService:
         if not raw or not raw.strip():
             return default
         return json.loads(raw)
+
+    @staticmethod
+    def get_analysis_text(analysis: dict) -> str:
+        """根据章节信息重建展示用原文。"""
+        chapters = analysis.get("chapters", []) if isinstance(analysis, dict) else []
+        return "\n\n".join(
+            filter(
+                None,
+                [
+                    f"{chapter.get('title', '')}\n{chapter.get('content', '').strip()}".strip()
+                    for chapter in chapters
+                ],
+            )
+        )
 
     def _save_chapters(self, chapters: list[dict]) -> None:
         with SessionLocal() as db:
@@ -346,6 +546,187 @@ class AppService:
             return self.vector_store.search("novel_segments", segment, k=3)
         except Exception:
             return []
+
+    def _prepare_analysis_context(self, text: str) -> dict:
+        if self.active_analysis is not None and self.current_text == text:
+            return self._clone_analysis(self.active_analysis)
+
+        chapters = self.chapter_splitter.split_chapters(text)
+        segments = self.chapter_splitter.split_segments(text)
+        return {
+            "novel_title": self._guess_novel_title(),
+            "created_at": self._now_iso(),
+            "characters": [],
+            "events": [],
+            "lore_entries": [],
+            "style": {},
+            "chapters": chapters,
+            "segments": segments,
+        }
+
+    def _hydrate_analysis(self, analysis: dict) -> None:
+        self._save_chapters(analysis.get("chapters", []))
+        self._save_extractions(
+            analysis.get("characters", []),
+            analysis.get("events", []),
+            analysis.get("lore_entries", []),
+            analysis.get("style", {}),
+        )
+        self._index_segments(analysis.get("segments", []))
+        self._index_lore_entries(analysis.get("lore_entries", []))
+
+    def _set_active_analysis(self, analysis: dict, text: str = "") -> None:
+        self.active_analysis = self._normalize_analysis(analysis)
+        self.current_text = text or self._rebuild_text_from_chapters(self.active_analysis.get("chapters", []))
+
+    def _require_active_analysis(self) -> dict:
+        if self.active_analysis is None:
+            raise ValueError("请先上传文本、完成提取，或导入已有分析记录。")
+        return self.active_analysis
+
+    def _get_chapter_by_index(self, analysis: dict, chapter_index: int) -> dict:
+        for chapter in analysis.get("chapters", []):
+            if self._coerce_int(chapter.get("index")) == chapter_index:
+                return chapter
+        raise ValueError(f"未找到章节索引：{chapter_index}")
+
+    def _get_segments_for_chapter(self, analysis: dict, chapter_index: int) -> list[dict]:
+        segments = [
+            segment
+            for segment in analysis.get("segments", [])
+            if self._coerce_int(segment.get("chapter_index")) == chapter_index and segment.get("content")
+        ]
+        if segments:
+            return segments
+        return self._build_fallback_segments(self._get_chapter_by_index(analysis, chapter_index))
+
+    def _build_fallback_segments(self, chapter: dict, chunk_size: int = 1500) -> list[dict]:
+        content = str(chapter.get("content", "")).strip()
+        if not content:
+            return []
+
+        segments = []
+        current_chunk = ""
+        segment_index = 0
+        for paragraph in content.split("\n\n"):
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            if current_chunk and len(current_chunk) + len(paragraph) + 2 > chunk_size:
+                segments.append(
+                    {
+                        "id": f"chapter_{chapter.get('index', 0)}_{segment_index}",
+                        "chapter_index": chapter.get("index", 0),
+                        "chapter_title": chapter.get("title", "全文"),
+                        "content": current_chunk,
+                    }
+                )
+                current_chunk = ""
+                segment_index += 1
+            current_chunk = f"{current_chunk}\n\n{paragraph}".strip() if current_chunk else paragraph
+
+        if current_chunk:
+            segments.append(
+                {
+                    "id": f"chapter_{chapter.get('index', 0)}_{segment_index}",
+                    "chapter_index": chapter.get("index", 0),
+                    "chapter_title": chapter.get("title", "全文"),
+                    "content": current_chunk,
+                }
+            )
+        return segments
+
+    def _rewrite_segments(
+        self,
+        segments: list[dict],
+        instruction: str,
+        characters: list[dict],
+        lore_entries: list[dict],
+        temperature: float | None = None,
+    ) -> list[dict]:
+        rewritten_segments = []
+        for segment in segments:
+            result = self.rewrite(
+                segment.get("content", ""),
+                instruction,
+                characters=characters,
+                lore_entries=lore_entries,
+                temperature=temperature,
+            )
+            rewritten_segments.append(
+                {
+                    "segment_id": segment.get("id", ""),
+                    "original_text": segment.get("content", ""),
+                    "rewritten_text": result["rewritten_text"],
+                    "context": result["context"],
+                    "consistency": result["consistency"],
+                }
+            )
+        return rewritten_segments
+
+    @staticmethod
+    def _combine_chapter_results(chapters: list[dict], field_name: str) -> str:
+        return "\n\n".join(
+            filter(
+                None,
+                [
+                    f"{item.get('chapter_title', '')}\n{item.get(field_name, '').strip()}".strip()
+                    for item in chapters
+                ],
+            )
+        )
+
+    @staticmethod
+    def _build_diff_html(original_text: str, rewritten_text: str, fromdesc: str, todesc: str) -> str:
+        return difflib.HtmlDiff(wrapcolumn=80).make_table(
+            original_text.splitlines(),
+            rewritten_text.splitlines(),
+            fromdesc=fromdesc,
+            todesc=todesc,
+            context=True,
+            numlines=2,
+        )
+
+    def _normalize_analysis(self, analysis: dict, default_title: str | None = None) -> dict:
+        if not isinstance(analysis, dict):
+            raise ValueError("分析记录格式错误，必须是 JSON 对象。")
+
+        novel_title = str(analysis.get("novel_title") or default_title or "未命名小说").strip() or "未命名小说"
+        chapters = analysis.get("chapters") if isinstance(analysis.get("chapters"), list) else []
+        segments = analysis.get("segments") if isinstance(analysis.get("segments"), list) else []
+
+        return {
+            "novel_title": novel_title,
+            "created_at": str(analysis.get("created_at") or self._now_iso()),
+            "characters": analysis.get("characters") if isinstance(analysis.get("characters"), list) else [],
+            "events": analysis.get("events") if isinstance(analysis.get("events"), list) else [],
+            "lore_entries": analysis.get("lore_entries") if isinstance(analysis.get("lore_entries"), list) else [],
+            "style": analysis.get("style") if isinstance(analysis.get("style"), dict) else {},
+            "chapters": chapters,
+            "segments": segments,
+        }
+
+    @staticmethod
+    def _clone_analysis(analysis: dict) -> dict:
+        return json.loads(json.dumps(analysis, ensure_ascii=False))
+
+    @staticmethod
+    def _safe_filename(title: str) -> str:
+        invalid_chars = '<>:"/\\|?*'
+        safe_title = "".join("_" if char in invalid_chars else char for char in title).strip().strip(".")
+        return safe_title or "未命名小说"
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now().isoformat()
+
+    def _guess_novel_title(self) -> str:
+        if self.active_analysis and self.active_analysis.get("novel_title"):
+            return self.active_analysis["novel_title"]
+        return "未命名小说"
+
+    def _rebuild_text_from_chapters(self, chapters: list[dict]) -> str:
+        return self.get_analysis_text({"chapters": chapters})
 
     @staticmethod
     def _coerce_int(value) -> int:
