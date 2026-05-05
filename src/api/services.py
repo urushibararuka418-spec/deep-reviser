@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import difflib
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
 from fastapi import UploadFile
+from sqlalchemy import asc
 from sqlalchemy import delete
 
 from src.config import settings
@@ -410,9 +412,111 @@ class AppService:
     def export_rewrites_to_tempfile(self, rewrites: list[dict], title: str = "rewritten_novel") -> str:
         """为 Gradio 生成临时下载文件。"""
         result = self.export_rewrites(rewrites, title=title)
-        with NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as handle:
-            handle.write(result["content"])
-            return handle.name
+        return self._write_temp_txt(result["content"])
+
+    def get_rewrite_history(self, page: int = 1, page_size: int = 20) -> dict:
+        """分页查询改写历史列表。"""
+        if page < 1:
+            raise ValueError("page 必须大于等于 1。")
+        if page_size < 1:
+            raise ValueError("page_size 必须大于等于 1。")
+
+        with SessionLocal() as db:
+            query = db.query(RewriteHistory)
+            total = query.count()
+            records = (
+                query.order_by(RewriteHistory.created_at.desc(), RewriteHistory.id.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+                .all()
+            )
+
+        items = []
+        for record in records:
+            items.append(
+                {
+                    "id": record.id,
+                    "segment_id": record.segment_id,
+                    "original_preview": self._build_preview(record.original_text),
+                    "rewritten_preview": self._build_preview(record.rewritten_text),
+                    "instruction": record.instruction or "",
+                    "created_at": self._format_datetime(record.created_at),
+                }
+            )
+
+        total_pages = math.ceil(total / page_size) if total else 0
+        return {
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+        }
+
+    def get_rewrite_detail(self, record_id: int) -> dict:
+        """返回单条改写历史详情。"""
+        with SessionLocal() as db:
+            record = db.query(RewriteHistory).filter(RewriteHistory.id == record_id).first()
+
+        if record is None:
+            raise ValueError(f"未找到改写历史记录：{record_id}")
+
+        return {
+            "id": record.id,
+            "segment_id": record.segment_id,
+            "original_text": record.original_text or "",
+            "rewritten_text": record.rewritten_text or "",
+            "instruction": record.instruction or "",
+            "created_at": self._format_datetime(record.created_at),
+            "diff_html": self._build_diff_html(
+                record.original_text or "",
+                record.rewritten_text or "",
+                fromdesc="原文",
+                todesc="改写后",
+            ),
+        }
+
+    def export_rewrite_history(self, title: str = "改写历史导出") -> dict:
+        """按时间顺序导出全部改写历史。"""
+        with SessionLocal() as db:
+            records = (
+                db.query(RewriteHistory)
+                .order_by(asc(RewriteHistory.created_at), asc(RewriteHistory.id))
+                .all()
+            )
+
+        export_dir = settings.project_root / "data" / "exports"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        safe_title = self._safe_filename(title.strip() or "改写历史导出")
+        export_path = export_dir / f"{safe_title}.txt"
+
+        parts = [title.strip() or "改写历史导出"]
+        for index, record in enumerate(records, start=1):
+            parts.append(
+                "\n".join(
+                    [
+                        f"第 {index} 条",
+                        f"记录ID：{record.id}",
+                        f"段落ID：{record.segment_id or ''}",
+                        f"时间：{self._format_datetime(record.created_at)}",
+                        f"指令：{record.instruction or ''}",
+                        "原文：",
+                        record.original_text or "",
+                        "改写后：",
+                        record.rewritten_text or "",
+                    ]
+                )
+            )
+
+        export_text = "\n\n".join(parts)
+        export_path.write_text(export_text, encoding="utf-8")
+
+        return {
+            "path": str(export_path),
+            "content": export_text,
+            "record_count": len(records),
+            "title": title.strip() or "改写历史导出",
+        }
 
     @staticmethod
     def parse_json_field(raw: str, default):
@@ -523,6 +627,13 @@ class AppService:
                 )
             )
             db.commit()
+
+    @staticmethod
+    def _write_temp_txt(content: str) -> str:
+        """生成临时 txt 文件，供界面下载。"""
+        with NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False) as handle:
+            handle.write(content)
+            return handle.name
 
     def _index_segments(self, segments: list[dict]) -> None:
         if not segments:
@@ -709,6 +820,21 @@ class AppService:
             context=True,
             numlines=2,
         )
+
+    @staticmethod
+    def _build_preview(text: str | None, limit: int = 50) -> str:
+        """生成历史列表预览文本。"""
+        content = (text or "").replace("\n", " ").strip()
+        if len(content) <= limit:
+            return content
+        return f"{content[:limit]}..."
+
+    @staticmethod
+    def _format_datetime(value: datetime | None) -> str:
+        """统一格式化时间字段。"""
+        if value is None:
+            return ""
+        return value.strftime("%Y-%m-%d %H:%M:%S")
 
     def _normalize_analysis(self, analysis: dict, default_title: str | None = None) -> dict:
         if not isinstance(analysis, dict):

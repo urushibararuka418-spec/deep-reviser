@@ -46,6 +46,36 @@ def _build_diff_panel(diff_html: str) -> str:
     return f"<div style='overflow:auto; max-height: 720px;'>{diff_html}</div>"
 
 
+def _build_history_rows(items: list[dict]) -> list[list]:
+    """将历史记录转换为表格行。"""
+    rows = []
+    for index, item in enumerate(items, start=1):
+        rows.append(
+            [
+                index,
+                item.get("id"),
+                item.get("segment_id", ""),
+                item.get("original_preview", ""),
+                item.get("rewritten_preview", ""),
+                item.get("instruction", ""),
+                item.get("created_at", ""),
+            ]
+        )
+    return rows
+
+
+def _build_history_detail(detail: dict) -> str:
+    """构建历史详情展示文本。"""
+    return (
+        f"记录 ID：{detail.get('id', '')}\n"
+        f"段落 ID：{detail.get('segment_id', '')}\n"
+        f"时间：{detail.get('created_at', '')}\n"
+        f"指令：{detail.get('instruction', '')}\n\n"
+        f"原文：\n{detail.get('original_text', '')}\n\n"
+        f"改写后：\n{detail.get('rewritten_text', '')}"
+    )
+
+
 def _build_batch_summary(result: dict) -> str:
     stats = result.get("stats", {})
     return (
@@ -247,6 +277,45 @@ def _handle_batch_rewrite(chapter_indices, instruction, export_title):
     )
 
 
+def _load_rewrite_history(page, page_size):
+    """加载改写历史分页列表。"""
+    try:
+        result = get_app_service().get_rewrite_history(int(page), int(page_size))
+    except ValueError as exc:
+        raise gr.Error(str(exc)) from exc
+
+    summary = (
+        f"当前第 {result['page']} 页 / 共 {result['total_pages']} 页\n"
+        f"每页 {result['page_size']} 条，共 {result['total']} 条记录"
+    )
+    return _build_history_rows(result["items"]), summary
+
+
+def _show_rewrite_history_detail(history_table):
+    """根据表格选中行展示完整历史详情。"""
+    if not history_table:
+        raise gr.Error("当前没有可查看的历史记录。")
+
+    record_id = history_table[0][1] if history_table and len(history_table[0]) > 1 else None
+    if record_id is None:
+        raise gr.Error("请选择有效的历史记录。")
+
+    try:
+        detail = get_app_service().get_rewrite_detail(int(record_id))
+    except ValueError as exc:
+        raise gr.Error(str(exc)) from exc
+
+    return _build_history_detail(detail), _build_diff_panel(detail["diff_html"])
+
+
+def _export_rewrite_history(export_title):
+    """导出全部改写历史并生成下载文件。"""
+    result = get_app_service().export_rewrite_history(export_title or "改写历史导出")
+    download_path = get_app_service()._write_temp_txt(result["content"])
+    summary = f"已导出 {result['record_count']} 条历史记录：{result['title']}"
+    return download_path, summary
+
+
 def build_app() -> gr.Blocks:
     """构建 Gradio Blocks 应用。"""
     with gr.Blocks(title="Deep Reviser") as demo:
@@ -311,6 +380,29 @@ def build_app() -> gr.Blocks:
                     batch_rewritten_text = gr.Textbox(label="批量改写结果", lines=16)
                     batch_diff = gr.HTML(label="Diff 对比")
                     batch_download_file = gr.File(label="下载批量改写结果")
+
+        with gr.Tab("改写历史"):
+            with gr.Row():
+                history_page = gr.Number(label="页码", value=1, precision=0)
+                history_page_size = gr.Number(label="每页条数", value=20, precision=0)
+                history_refresh_btn = gr.Button("加载历史", variant="primary")
+            history_summary = gr.Textbox(label="分页信息", lines=2)
+            history_table = gr.Dataframe(
+                label="历史记录列表",
+                headers=["序号", "记录ID", "段落ID", "原文前50字", "改写后前50字", "指令", "时间"],
+                datatype=["number", "number", "str", "str", "str", "str", "str"],
+                row_count=(0, "dynamic"),
+                col_count=(7, "fixed"),
+                interactive=False,
+                wrap=True,
+            )
+            view_history_btn = gr.Button("查看首条记录详情")
+            history_detail = gr.Textbox(label="完整对比详情", lines=18)
+            history_diff = gr.HTML(label="Diff 对比")
+            history_export_title = gr.Textbox(label="导出文件名", value="改写历史导出")
+            export_history_btn = gr.Button("导出全部历史")
+            history_download_file = gr.File(label="下载改写历史")
+            history_export_status = gr.Textbox(label="导出状态", lines=2)
 
         upload_btn.click(
             _handle_upload,
@@ -391,6 +483,21 @@ def build_app() -> gr.Blocks:
             _handle_batch_rewrite,
             inputs=[chapter_selector, batch_instruction, batch_export_title],
             outputs=[batch_rewritten_text, batch_diff, batch_stats, batch_download_file],
+        )
+        history_refresh_btn.click(
+            _load_rewrite_history,
+            inputs=[history_page, history_page_size],
+            outputs=[history_table, history_summary],
+        )
+        view_history_btn.click(
+            _show_rewrite_history_detail,
+            inputs=[history_table],
+            outputs=[history_detail, history_diff],
+        )
+        export_history_btn.click(
+            _export_rewrite_history,
+            inputs=[history_export_title],
+            outputs=[history_download_file, history_export_status],
         )
 
     return demo

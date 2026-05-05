@@ -185,6 +185,33 @@ def rewrite_batch(payload: RewriteBatchRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.get("/rewrite/history")
+def rewrite_history(page: int = 1, page_size: int = 20):
+    """分页返回改写历史记录列表。"""
+    try:
+        return get_app_service().get_rewrite_history(page=page, page_size=page_size)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/rewrite/history/{record_id}")
+def rewrite_history_detail(record_id: int):
+    """返回某条改写的完整原文、改写后文本与指令。"""
+    try:
+        return get_app_service().get_rewrite_detail(record_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/rewrite/export-history")
+def export_rewrite_history(title: str = Form("改写历史导出")):
+    """将全部改写历史按时间顺序合并导出为 txt。"""
+    try:
+        return get_app_service().export_rewrite_history(title)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/export")
 def export(payload: ExportRequest):
     """导出改写文本。"""
