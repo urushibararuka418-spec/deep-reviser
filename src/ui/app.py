@@ -392,7 +392,7 @@ def build_app() -> gr.Blocks:
                 headers=["序号", "记录ID", "段落ID", "原文前50字", "改写后前50字", "指令", "时间"],
                 datatype=["number", "number", "str", "str", "str", "str", "str"],
                 row_count=(0, "dynamic"),
-                col_count=(7, "fixed"),
+                column_count=(7, "fixed"),
                 interactive=False,
                 wrap=True,
             )

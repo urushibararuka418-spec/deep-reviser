@@ -42,7 +42,7 @@ echo   FastAPI ready.
 :: Start Gradio UI
 echo.
 echo Starting Gradio Web UI (port 7860) ...
-start "DeepReviser-UI" cmd /c ""%VENV_PYTHON%" src/ui/app.py"
+start "DeepReviser-UI" cmd /c ""%VENV_PYTHON%" -m src.ui.app"
 echo   Gradio UI: http://127.0.0.1:7860
 
 echo.
