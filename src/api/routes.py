@@ -3,6 +3,7 @@
 import json
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 
 from src.api.schemas import (
     ExportRequest,
@@ -113,6 +114,49 @@ def rewrite(payload: RewriteRequest):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/rewrite/stream")
+async def rewrite_stream(payload: RewriteRequest):
+    """流式改写 — SSE 实时返回推理过程和正文。"""
+    from src.rewriter.context_assembler import Context
+    import asyncio
+
+    service = get_app_service()
+
+    characters = payload.characters or []
+    lore_entries = payload.lore_entries or []
+    similar_segments = payload.similar_segments or []
+
+    if not similar_segments:
+        similar_segments = service._search_similar_segments(payload.segment)
+
+    context = service.context_assembler.assemble(
+        payload.segment,
+        characters=characters,
+        lore_entries=lore_entries,
+        similar_segments=similar_segments,
+    )
+
+    async def event_stream():
+        try:
+            for chunk in service.rewrite_engine.rewrite_stream(
+                payload.segment,
+                payload.instruction,
+                context,
+                temperature=payload.temperature,
+            ):
+                event = "thinking" if chunk["type"] == "thinking" else "content"
+                yield f"event: {event}\ndata: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0)  # 让出控制权
+        except Exception as e:
+            yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/rewrite/chapter")

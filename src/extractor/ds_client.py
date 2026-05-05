@@ -24,7 +24,7 @@ class DeepSeekClient:
 
     def chat(self, messages, **kwargs) -> str:
         """
-        调用 DeepSeek chat API 并返回回复文本。
+        调用 DeepSeek chat API 并返回回复文本（非流式）。
 
         Args:
             messages: OpenAI 格式的消息列表
@@ -39,6 +39,43 @@ class DeepSeekClient:
             **kwargs,
         )
         return response.choices[0].message.content
+
+    def chat_stream(self, messages, **kwargs):
+        """
+        调用 DeepSeek chat API 并逐块流式返回（生成器）。
+
+        每个 chunk 为 dict:
+          {"type": "thinking", "text": "..."}   # 推理过程
+          {"type": "content", "text": "..."}     # 正文内容
+
+        DeepSeek V3/V4 流式响应中包含 delta.reasoning_content（推理）
+        和 delta.content（正文），两者分开 yield。
+
+        Args:
+            messages: OpenAI 格式的消息列表
+            **kwargs: 传递的额外参数
+
+        Yields:
+            dict: {"type": "thinking"|"content", "text": str}
+        """
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            stream=True,
+            stream_options={"include_usage": True},
+            **kwargs,
+        )
+        for chunk in response:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if not delta:
+                continue
+            # 推理过程（DeepSeek 特有）
+            thinking = getattr(delta, "reasoning_content", None) or ""
+            if thinking:
+                yield {"type": "thinking", "text": thinking}
+            # 正文内容
+            if getattr(delta, "content", None):
+                yield {"type": "content", "text": delta.content}
 
     def extract_json(self, system_prompt, user_content) -> dict:
         """

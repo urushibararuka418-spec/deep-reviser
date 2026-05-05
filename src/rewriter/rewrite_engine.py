@@ -17,12 +17,25 @@ class RewriteEngine:
         self.client = client or DeepSeekClient()
 
     def rewrite(self, segment, instruction, context, **kwargs):
-        """根据指令和上下文改写段落。"""
-        messages = [
+        """根据指令和上下文改写段落（非流式）。"""
+        messages = self._build_messages(segment, instruction, context)
+        return self.client.chat(messages, **kwargs)
+
+    def rewrite_stream(self, segment, instruction, context, **kwargs):
+        """流式改写 — 实时返回推理过程和正文（生成器）。
+
+        每个 chunk 为 dict: {"type": "thinking"|"content", "text": str}
+        用于 UI 逐步展示推理逻辑和生成过程。
+        """
+        messages = self._build_messages(segment, instruction, context)
+        yield from self.client.chat_stream(messages, **kwargs)
+
+    def _build_messages(self, segment, instruction, context):
+        """构建发送给模型的消息列表。"""
+        return [
             {"role": "system", "content": REWRITE_SYSTEM_PROMPT},
             {"role": "user", "content": self._build_user_prompt(segment, instruction, context)},
         ]
-        return self.client.chat(messages, **kwargs)
 
     def _build_user_prompt(self, segment, instruction, context):
         """构造给模型的用户提示。"""
